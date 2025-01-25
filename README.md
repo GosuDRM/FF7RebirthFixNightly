@@ -5,6 +5,8 @@
 This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, distributed as a nightly build while waiting for the official release. It might contain bugs
 
 ## Features
+### General
+- Adjustable framerate cap.
 
 ### Ultrawide
 - Support for any aspect ratio with corrected FOV.
@@ -21,6 +23,13 @@ This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, dis
 
 ## Configuration
 - See **FF7RebirthFix.ini** to adjust settings.
+
+## Known Issues
+### Ultrawide
+- HUD may appear blurry at wider aspect ratios such as 32:9.
+- Some button prompts may appear off-screen.
+- Fades to black do not span the screen and mask loading.
+- Some HUD elements such as the blue glow around selections in the main menu are positioned incorrectly. 
 
 ## Screenshots
 | ![ezgif-6-f9ee9cf766](https://github.com/user-attachments/assets/1876814b-c14a-4048-86c8-2f552f086641) |
