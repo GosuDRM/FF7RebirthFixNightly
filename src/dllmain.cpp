@@ -15,7 +15,7 @@ HMODULE thisModule;
 
 // Fix details
 std::string sFixName = "FF7RebirthFix";
-std::string sFixVersion = "0.0.2";
+std::string sFixVersion = "0.0.3";
 std::filesystem::path sFixPath;
 
 // Ini
@@ -301,6 +301,18 @@ void AspectRatioFOV()
         else {
             spdlog::error("Aspect Ratio/FOV: Pattern scan failed.");
         }
+
+        // White screen bug with TAA
+        // TODO: This is kind of a hack solution. NSight/RenderDoc for more info?
+        std::uint8_t* WhiteScreenBugScanResult = Memory::PatternScan(exeModule, "C7 45 ?? 38 04 00 00 48 8D ?? ?? ?? ?? ?? 75 ?? 48 8D ?? ?? ?? ?? ?? 45 33 ??");
+        if (WhiteScreenBugScanResult) {
+            spdlog::info("White Screen Bug: Address is {:s}+{:x}", sExeName.c_str(), WhiteScreenBugScanResult - (std::uint8_t*)exeModule);
+            Memory::PatchBytes(WhiteScreenBugScanResult + 0x3, "\x39", 1);
+            spdlog::info("White Screen Bug: Patched instruction.");
+        }
+        else {
+            spdlog::error("White Screen Bug: Pattern scan failed.");
+        }
     }
 
     if (bFixAspect || bDisableVignette) {
@@ -328,17 +340,13 @@ void AspectRatioFOV()
 
     if (fGameplayFOVMulti != 1.00f) {
         // Gameplay FOV
-        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? 4C 39 ?? ?? ?? ?? ?? 0F 84 ?? ?? ?? ?? C5 F8 ?? ?? ?? 49 ?? ?? E8 ?? ?? ?? ??");
+        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 CA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? 45 ?? ??");
         if (GameplayFOVScanResult) {
             spdlog::info("Gameplay FOV: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVScanResult - (std::uint8_t*)exeModule);
             static SafetyHookMid GameplayFOVMidHook{};
             GameplayFOVMidHook = safetyhook::create_mid(GameplayFOVScanResult,
                 [](SafetyHookContext& ctx) {
-                    if (ctx.rdx + 0x3C) {
-                        float fov = *reinterpret_cast<float*>(ctx.rdx + 0x38);
-                        fov *= fGameplayFOVMulti;
-                        *reinterpret_cast<float*>(ctx.rcx + 0x38) = fov;
-                    }
+                    ctx.xmm0.f32[0] *= fGameplayFOVMulti;
                 });
         }
         else {
@@ -357,7 +365,7 @@ void HUD()
             static SafetyHookMid HUDCompositeLayerMidHook{};
             HUDCompositeLayerMidHook = safetyhook::create_mid(HUDCompositeLayerScanResult,
                 [](SafetyHookContext& ctx) {
-                    if (ctx.rbx + 0x200) {
+                    if (ctx.rbx + 0x200 && !bMovieIsPlaying) {
                         iCompositeLayerX = (int)ctx.rcx;
                         iCompositeLayerY = (int)ctx.rax;
 
@@ -398,12 +406,14 @@ void HUD()
                 [](SafetyHookContext& ctx) {
                     if (!bMovieIsPlaying) {
                         if (fAspectRatio > fNativeAspect) {
-                            fHUDWidthScale = (float)iCurrentResY * 1.00f / 1080.00f;
-                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
+                            fHUDWidthScale = (float)iCurrentResY * (1.00f / 1080.00f);
+                            fHUDWidthScale = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
+                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = fHUDWidthScale;
                         }
                         else if (fAspectRatio < fNativeAspect) {
-                            fHUDWidthScale = fHUDHeight * 1.00f / 1080.00f;
-                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
+                            fHUDWidthScale = fHUDHeight * (1.00f / 1080.00f);
+                            fHUDWidthScale = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
+                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = fHUDWidthScale;
                         }
                     }
                 });
@@ -442,20 +452,77 @@ void HUD()
             static SafetyHookMid HUDMapMidHook{};
             HUDMapMidHook = safetyhook::create_mid(HUDMapScanResult + 0x5,
                 [](SafetyHookContext& ctx) {
-                    if (!bMovieIsPlaying) {
-                        if (fAspectRatio > fNativeAspect) {
-                            fHUDWidthScale = (float)iCurrentResY * 1.00f / 1080.00f;
-                            ctx.xmm0.f32[0] = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
-                        }
-                        else if (fAspectRatio < fNativeAspect) {
-                            fHUDWidthScale = fHUDHeight * 1.00f / 1080.00f;
-                            ctx.xmm0.f32[0] = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
-                        }
-                    }
+                    if (fAspectRatio != fNativeAspect) {
+                        ctx.xmm0.f32[0] = fHUDWidthScale;
+                    }    
                 });
         }
         else {
             spdlog::error("HUD: Map: Pattern scan failed.");
+        }
+
+        // QTE Prompts
+        // TODO: This still isn't right as they move up and down with the camera, but at least they're visibile now.
+        std::uint8_t* QTEPromptsScanResult = Memory::PatternScan(exeModule, "C5 C2 ?? ?? ?? ?? ?? ?? C5 FC ?? ?? ?? ?? ?? ?? ?? C5 FC ?? ?? ?? ?? ?? ?? C5 FC ?? ?? ?? ?? ?? ?? ??");
+        if (QTEPromptsScanResult) {
+            spdlog::info("HUD: QTE Prompts: Address is {:s}+{:x}", sExeName.c_str(), QTEPromptsScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid QTEPromptsOffsetMidHook{};
+            QTEPromptsOffsetMidHook = safetyhook::create_mid(QTEPromptsScanResult,
+                [](SafetyHookContext& ctx) {
+                    if (fAspectRatio > fNativeAspect) {
+                        ctx.xmm6.f32[0] += fHUDWidthOffset * 2.00f;
+                        ctx.xmm7.f32[0] += (float)iCompositeLayerY - (float)iCurrentResY;
+                    }
+                    else if (fAspectRatio < fNativeAspect) {
+                        ctx.xmm6.f32[0] += (float)iCompositeLayerX - (float)iCurrentResX;
+                        ctx.xmm7.f32[0] += fHUDHeightOffset * 2.00f;
+                    }
+                });
+
+            static SafetyHookMid QTEPromptsScaleMidHook{};
+            QTEPromptsScaleMidHook = safetyhook::create_mid(QTEPromptsScanResult + 0x52,
+                [](SafetyHookContext& ctx) {
+                    if (fAspectRatio > fNativeAspect)
+                        *reinterpret_cast<float*>(ctx.rsp + 0x4C) = 0.20f / fHUDWidthScale;
+                    else if (fAspectRatio < fNativeAspect)
+                        *reinterpret_cast<float*>(ctx.rsp + 0x50) = 0.20f / fHUDWidthScale;
+                });
+        }
+        else {
+            spdlog::error("HUD: QTE Prompts: Pattern scan failed.");
+        }
+
+        // Fades
+        std::uint8_t* HUDFadesScanResult = Memory::PatternScan(exeModule, "48 8B ?? ?? ?? ?? ?? ?? 48 89 ?? ?? ?? 48 8B ?? E8 ?? ?? ?? ?? 48 8B ?? ?? ?? 48 8B ?? ?? ?? 48 8B ?? ?? ??");
+        if (HUDFadesScanResult) {
+            spdlog::info("HUD: Fades: Address is {:s}+{:x}", sExeName.c_str(), HUDFadesScanResult - (std::uint8_t*)exeModule);
+            std::uint8_t* HUDFadesFunc = Memory::GetAbsolute(HUDFadesScanResult + 0x11);
+            spdlog::info("HUD: Fades: Function: Address is {:s}+{:x}", sExeName.c_str(), HUDFadesFunc - (std::uint8_t*)exeModule);
+
+            static SafetyHookMid HUDFadesSizeMidHook{};
+            HUDFadesSizeMidHook = safetyhook::create_mid(HUDFadesFunc + 0x1B9,
+                [](SafetyHookContext& ctx) {
+                    if (!bMovieIsPlaying) {
+                        if (fAspectRatio > fNativeAspect)
+                            ctx.xmm0.f32[0] = ctx.xmm0.f32[1] * fAspectRatio;
+                        else if (fAspectRatio < fNativeAspect)
+                            ctx.xmm0.f32[1] = ctx.xmm0.f32[0] / fAspectRatio;
+                    }
+                });
+
+            static SafetyHookMid HUDFadesOffsetMidHook{};
+            HUDFadesOffsetMidHook = safetyhook::create_mid(HUDFadesFunc + 0x1C8,
+                [](SafetyHookContext& ctx) {
+                    if (!bMovieIsPlaying) {
+                        if (fAspectRatio > fNativeAspect)
+                            ctx.xmm0.f32[0] = 0.00f;
+                        else if (fAspectRatio < fNativeAspect)
+                            ctx.xmm0.f32[1] = 0.00f;
+                    }
+                });
+        }
+        else {
+            spdlog::error("HUD: Fades: Pattern scan failed.");
         }
     }
 
