@@ -1,8 +1,6 @@
 ﻿#include "stdafx.h"
 #include "helper.hpp"
 
-#include "SDK/Engine_classes.hpp"
-
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <inipp/inipp.h>
@@ -15,7 +13,7 @@ HMODULE thisModule;
 
 // Fix details
 std::string sFixName = "FF7RebirthFix";
-std::string sFixVersion = "0.0.3";
+std::string sFixVersion = "0.0.4";
 std::filesystem::path sFixPath;
 
 // Ini
@@ -38,6 +36,7 @@ float fHUDWidth;
 float fHUDWidthOffset;
 float fHUDHeight;
 float fHUDHeightOffset;
+float fHUDHeightScale;
 
 // Ini variables
 bool bFixAspect;
@@ -46,6 +45,7 @@ bool bFixMovies;
 float fFramerateLimit = 120.00f;
 float fGameplayFOVMulti;
 bool bDisableVignette;
+float fHUDResScale;
 
 // Variables
 int iCurrentResX;
@@ -54,9 +54,10 @@ int iCompositeLayerX = 1920;
 int iCompositeLayerY = 1080;
 int iPrevCompositeLayerX;
 int iPrevCompositeLayerY;
-float fHUDWidthScale;
 bool bConsoleIsOpen = false;
 bool bMovieIsPlaying = false;
+int iScreenMode;
+bool bHUDNeedsResize = false;
 
 void Logging()
 {
@@ -126,14 +127,20 @@ void Configuration()
     // Load settings from ini
     inipp::get_value(ini.sections["Fix Aspect Ratio"], "Enabled", bFixAspect);
     inipp::get_value(ini.sections["Fix HUD"], "Enabled", bFixHUD);
+    inipp::get_value(ini.sections["Fix HUD"], "ResScale", fHUDResScale);
     inipp::get_value(ini.sections["Fix Movies"], "Enabled", bFixMovies);
     inipp::get_value(ini.sections["Framerate"], "FPS", fFramerateLimit);
     inipp::get_value(ini.sections["Gameplay FOV"], "Multiplier", fGameplayFOVMulti);
     inipp::get_value(ini.sections["Vignette"], "Disabled", bDisableVignette);
 
+    // Clamp settings to avoid breaking things
+    if (fHUDResScale != 0.00f)
+        fHUDResScale = std::clamp(fHUDResScale, 0.00f, 5.00f);
+
     // Log ini parse
     spdlog_confparse(bFixAspect);
     spdlog_confparse(bFixHUD);
+    spdlog_confparse(fHUDResScale);
     spdlog_confparse(bFixMovies);
     spdlog_confparse(fFramerateLimit);
     spdlog_confparse(fGameplayFOVMulti);
@@ -144,93 +151,105 @@ void Configuration()
 
 void CalculateAspectRatio(bool bLog)
 {
-    // Check if resolution is invalid
-    if (iCurrentResX <= 0 || iCurrentResY <= 0)
-        return;
-
-    if (iCurrentResX == 0 || iCurrentResY == 0) {
-        spdlog::error("Current Resolution: Resolution invalid, using desktop resolution instead.");
-        iCurrentResX = DesktopDimensions.first;
-        iCurrentResY = DesktopDimensions.second;
-    }
-
     // Calculate aspect ratio
     fAspectRatio = (float)iCurrentResX / (float)iCurrentResY;
     fAspectMultiplier = fAspectRatio / fNativeAspect;
-
-    // HUD 
-    fHUDWidth = (float)iCurrentResY * fNativeAspect;
-    fHUDHeight = (float)iCurrentResY;
-    fHUDWidthOffset = (float)(iCurrentResX - fHUDWidth) / 2.00f;
-    fHUDHeightOffset = 0.00f;
-    if (fAspectRatio < fNativeAspect) {
-        fHUDWidth = (float)iCurrentResX;
-        fHUDHeight = (float)iCurrentResX / fNativeAspect;
-        fHUDWidthOffset = 0.00f;
-        fHUDHeightOffset = (float)(iCurrentResY - fHUDHeight) / 2.00f;
-    }
 
     // Log details about current resolution
     if (bLog) {
         spdlog::info("----------");
         spdlog::info("Current Resolution: Resolution: {:d}x{:d}", iCurrentResX, iCurrentResY);
+        spdlog::info("Current Resolution: iScreenMode: {}", iScreenMode);
         spdlog::info("Current Resolution: fAspectRatio: {}", fAspectRatio);
         spdlog::info("Current Resolution: fAspectMultiplier: {}", fAspectMultiplier);
-        spdlog::info("Current Resolution: fHUDWidth: {}", fHUDWidth);
-        spdlog::info("Current Resolution: fHUDHeight: {}", fHUDHeight);
-        spdlog::info("Current Resolution: fHUDWidthOffset: {}", fHUDWidthOffset);
-        spdlog::info("Current Resolution: fHUDHeightOffset: {}", fHUDHeightOffset);
         spdlog::info("----------");
     }
+
+    // Signal for HUD resize
+    bHUDNeedsResize = true;
 }
 
-void UpdateOffsets()
+void CalculateHUD(bool bLog)
 {
-    // GObjects
-    std::uint8_t* GObjectsScanResult = Memory::PatternScan(exeModule, "48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? 48 8D ?? ?? EB ?? 33 ??");
-    if (GObjectsScanResult) {
-        spdlog::info("Offsets: GObjects: Address is {:s}+{:x}", sExeName.c_str(), GObjectsScanResult - (std::uint8_t*)exeModule);
-        std::uint8_t* GObjectsAddr = Memory::GetAbsolute(GObjectsScanResult + 0x3);
-        SDK::Offsets::GObjects = static_cast<UC::uint32>(GObjectsAddr - (std::uint8_t*)exeModule);
-        spdlog::info("Offsets: GObjects: {:x}", SDK::Offsets::GObjects);
+    const int MAX_RENDER_TARGET_SIZE = 16384;
+    float ResScale = 1.00f;
+
+    if (fHUDResScale == 0.00f) {
+        // Calculate a suggested resolution scale
+        if (fAspectRatio > fNativeAspect)
+            ResScale = fAspectMultiplier;
+        else if (fAspectRatio < fNativeAspect)
+            ResScale = 1.00f / fAspectMultiplier;
     }
     else {
-        spdlog::error("Offsets: GObjects: Pattern scan failed.");
+        // Apply user-defined resolution scale
+        ResScale = fHUDResScale;
     }
 
-    // GNames
-    std::uint8_t* GNamesScanResult = Memory::PatternScan(exeModule, "48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B ?? C6 ?? ?? ?? ?? ?? 01");
-    if (GNamesScanResult) {
-        spdlog::info("Offsets: GNames: Address is {:s}+{:x}", sExeName.c_str(), GNamesScanResult - (std::uint8_t*)exeModule);
-        std::uint8_t* GNamesAddr = Memory::GetAbsolute(GNamesScanResult + 0x3);
-        SDK::Offsets::GNames = static_cast<UC::uint32>(GNamesAddr - (std::uint8_t*)exeModule);
-        spdlog::info("Offsets: GNames: {:x}", SDK::Offsets::GNames);
+    // Set render target dimensions
+    if (fAspectRatio > fNativeAspect) {
+        iCompositeLayerX = iCurrentResX;
+        iCompositeLayerY = static_cast<int>(iCurrentResX / fNativeAspect);
     }
-    else {
-        spdlog::error("Offsets: GNames: Pattern scan failed.");
+    else if (fAspectRatio < fNativeAspect) {
+        iCompositeLayerX = static_cast<int>(iCurrentResY * fNativeAspect);
+        iCompositeLayerY = iCurrentResY;
     }
 
-    // ProcessEvent
-    std::uint8_t* ProcessEventScanResult = Memory::PatternScan(exeModule, "40 ?? 56 57 41 ?? 41 ?? 41 ?? 41 ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? 48 8D ?? ?? ?? 48 89 ?? ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 33 ?? 48 89 ?? ?? ?? ?? ?? 8B ?? ?? 45 33 ??");
-    if (ProcessEventScanResult) {
-        spdlog::info("Offsets: ProcessEvent: Address is {:s}+{:x}", sExeName.c_str(), ProcessEventScanResult - (std::uint8_t*)exeModule);
-        SDK::Offsets::ProcessEvent = static_cast<UC::uint32>(ProcessEventScanResult - (std::uint8_t*)exeModule);
-        spdlog::info("Offsets: ProcessEvent: {:x}", SDK::Offsets::ProcessEvent);
-    }
-    else {
-        spdlog::error("Offsets: ProcessEvent: Pattern scan failed.");
+    // Apply resolution scale
+    iCompositeLayerX = static_cast<int>(iCompositeLayerX * ResScale);
+    iCompositeLayerY = static_cast<int>(iCompositeLayerY * ResScale);
+
+    // Don't allow resolution of render target to exceed 16384 on X/Y axis
+    if (iCompositeLayerX > MAX_RENDER_TARGET_SIZE || iCompositeLayerY > MAX_RENDER_TARGET_SIZE) {
+        float scaleFactorX = static_cast<float>(MAX_RENDER_TARGET_SIZE) / iCompositeLayerX;
+        float scaleFactorY = static_cast<float>(MAX_RENDER_TARGET_SIZE) / iCompositeLayerY;
+
+        float finalScaleFactor = std::min(scaleFactorX, scaleFactorY);
+
+        iCompositeLayerX = static_cast<int>(iCompositeLayerX * finalScaleFactor);
+        iCompositeLayerY = static_cast<int>(iCompositeLayerY * finalScaleFactor);
     }
 
-    spdlog::info("----------");
+    // Calculate HUD size and offsets to position HUD within render target
+    if (fAspectRatio > fNativeAspect) {
+        fHUDWidth = std::ceilf((static_cast<float>(iCompositeLayerX) / fAspectRatio) * fNativeAspect);
+        fHUDHeight = std::ceilf(static_cast<float>(iCompositeLayerX) / fAspectRatio);
+
+        fHUDWidthOffset = (static_cast<float>(iCompositeLayerX) - fHUDWidth) / 2.00f;
+        fHUDHeightOffset = (static_cast<float>(iCompositeLayerY) - fHUDHeight) / 2.00f;
+    }
+    else if (fAspectRatio < fNativeAspect) {
+        fHUDWidth = std::ceilf(static_cast<float>(iCompositeLayerY) * fAspectRatio);
+        fHUDHeight = std::ceilf((static_cast<float>(iCompositeLayerY) * fAspectRatio) / fNativeAspect);
+
+        fHUDWidthOffset = (static_cast<float>(iCompositeLayerX) - fHUDWidth) / 2.00f;
+        fHUDHeightOffset = (static_cast<float>(iCompositeLayerY) - fHUDHeight) / 2.00f;
+    }
+
+    // Calculate HUD scale
+    fHUDHeightScale = std::ceilf(fHUDHeight * (1.00f / 1080.00f) * 1000.00f) / 1000.00f;
+
+    // Log details about current HUD size
+    if (bLog) {
+        spdlog::info("----------");
+        spdlog::info("HUD: Resolution: {}x{} - ResScale: {}", iCompositeLayerX, iCompositeLayerY, ResScale);
+        spdlog::info("HUD: fHUDWidth: {}", fHUDWidth);
+        spdlog::info("HUD: fHUDHeight: {}", fHUDHeight);
+        spdlog::info("HUD: fHUDWidthOffset: {}", fHUDWidthOffset);
+        spdlog::info("HUD: fHUDHeightOffset: {}", fHUDHeightOffset);
+        spdlog::info("HUD: fHUDHeightScale: {}", fHUDHeightScale);
+        spdlog::info("----------");
+    }
+
+    // Signal that HUD resize is over
+    bHUDNeedsResize = false;
 }
 
 void CurrentResolution()
 {
     // Grab desktop resolution
     DesktopDimensions = Util::GetPhysicalDesktopDimensions();
-    iCurrentResX = DesktopDimensions.first;
-    iCurrentResY = DesktopDimensions.second;
-    CalculateAspectRatio(true);
 
     // Replace 3840x2160 windowed option with desktop resolution
     std::uint8_t* WindowedResListScanResult = Memory::PatternScan(exeModule, "C7 ?? ?? ?? 00 0F 00 00 C7 ?? ?? ?? 70 08 00 00");
@@ -251,11 +270,10 @@ void CurrentResolution()
         CurrentResolutionMidHook = safetyhook::create_mid(CurrentResolutionScanResult,
             [](SafetyHookContext& ctx) {
                 // Read resolution
-                int iResX = (int)ctx.rsi;
-                int iResY = (int)ctx.rdi;
+                int iResX = static_cast<int>(ctx.rsi);
+                int iResY = static_cast<int>(ctx.rdi);
 
-                int iScreenMode = (int)ctx.rbx;
-                spdlog::info("Current Resolution: iScreenMode = {}", iScreenMode);
+                iScreenMode = static_cast<int>(ctx.rbx);
 
                 // If using borderless, use the desktop resolution
                 if (iScreenMode == 1) {
@@ -365,31 +383,15 @@ void HUD()
             static SafetyHookMid HUDCompositeLayerMidHook{};
             HUDCompositeLayerMidHook = safetyhook::create_mid(HUDCompositeLayerScanResult,
                 [](SafetyHookContext& ctx) {
-                    if (ctx.rbx + 0x200 && !bMovieIsPlaying) {
-                        iCompositeLayerX = (int)ctx.rcx;
-                        iCompositeLayerY = (int)ctx.rax;
-
-                        if (fAspectRatio > fNativeAspect) {
-                            iCompositeLayerX = iCurrentResX;
-                            iCompositeLayerY = (int)ceilf((float)iCurrentResX / fNativeAspect);
+                    if (ctx.rbx + 0x200 && !bMovieIsPlaying && fAspectRatio != fNativeAspect) {
+                        // Calculate new HUD size if resolution changed
+                        if (bHUDNeedsResize) {
+                            CalculateHUD(true); 
                         }
 
-                        if (fAspectRatio < fNativeAspect) {
-                            iCompositeLayerX = (int)ceilf((float)iCurrentResY * fNativeAspect);
-                            iCompositeLayerY = iCurrentResY;
-                        }
-
-                        // Set new render target dimensions 
+                        // Set render target dimensions. 
                         *reinterpret_cast<int*>(ctx.rbx + 0x200) = iCompositeLayerX;
                         *reinterpret_cast<int*>(ctx.rbx + 0x204) = iCompositeLayerY;
-
-                        // Log resolution
-                        if (iCompositeLayerX != iPrevCompositeLayerX || iCompositeLayerY != iPrevCompositeLayerY) {
-                            spdlog::info("HUD: Composite Layer: Resolution: {}x{}", iCompositeLayerX, iCompositeLayerY);
-
-                            iPrevCompositeLayerX = iCompositeLayerX;
-                            iPrevCompositeLayerY = iCompositeLayerY;
-                        }
                     }
                 });
         }
@@ -397,52 +399,24 @@ void HUD()
             spdlog::error("HUD: Composite Layer: Pattern scan failed.");
         }
 
-        // HUD Scale
-        std::uint8_t* HUDScaleScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? ?? C5 ?? ?? ?? C4 41 ?? ?? ?? C5 ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? C5 ?? ?? ?? C5 ?? ?? ??");
-        if (HUDScaleScanResult) {
-            spdlog::info("HUD: Scale: Address is {:s}+{:x}", sExeName.c_str(), HUDScaleScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid HUDScaleMidHook{};
-            HUDScaleMidHook = safetyhook::create_mid(HUDScaleScanResult + 0x6,
+        // HUD Size
+        std::uint8_t* HUDSizeScanResult = Memory::PatternScan(exeModule, "C5 FA 11 ?? ?? ?? ?? ?? ?? C5 FA 11 ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? ?? ?? E8 ?? ?? ?? ??");
+        if (HUDSizeScanResult) {
+            spdlog::info("HUD: Size: Address is {:s}+{:x}", sExeName.c_str(), HUDSizeScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid HUDSizeMidHook{};
+            HUDSizeMidHook = safetyhook::create_mid(HUDSizeScanResult,
                 [](SafetyHookContext& ctx) {
                     if (!bMovieIsPlaying) {
-                        if (fAspectRatio > fNativeAspect) {
-                            fHUDWidthScale = (float)iCurrentResY * (1.00f / 1080.00f);
-                            fHUDWidthScale = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
-                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = fHUDWidthScale;
-                        }
-                        else if (fAspectRatio < fNativeAspect) {
-                            fHUDWidthScale = fHUDHeight * (1.00f / 1080.00f);
-                            fHUDWidthScale = std::ceilf(fHUDWidthScale * 10000.00f) / 10000.00f;
-                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = fHUDWidthScale;
+                        if (fAspectRatio != fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rsp + 0x78) = fHUDHeightScale;
+                            *reinterpret_cast<float*>(ctx.rsp + 0x7C) = fHUDWidthOffset;
+                            *reinterpret_cast<float*>(ctx.rsp + 0x80) = fHUDHeightOffset;
                         }
                     }
                 });
         }
         else {
-            spdlog::error("HUD: Scale: Pattern scan failed.");
-        }
-
-        // HUD Offset
-        std::uint8_t* HUDOffsetScanResult = Memory::PatternScan(exeModule, "C5 FA 11 ?? ?? ?? ?? ?? ?? C5 FA 11 ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? ?? ?? E8 ?? ?? ?? ??");
-        if (HUDOffsetScanResult) {
-            spdlog::info("HUD: Offset: Address is {:s}+{:x}", sExeName.c_str(), HUDOffsetScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid HUDOffsetMidHook{};
-            HUDOffsetMidHook = safetyhook::create_mid(HUDOffsetScanResult,
-                [](SafetyHookContext& ctx) {
-                    if (!bMovieIsPlaying) {
-                        if (fAspectRatio > fNativeAspect) {
-                            *reinterpret_cast<float*>(ctx.rsp + 0x7C) = fHUDWidthOffset;                                            // Horizontal offset
-                            *reinterpret_cast<float*>(ctx.rsp + 0x80) = ((float)iCompositeLayerY - (float)iCurrentResY) / 2.00f;    // Vertical offset
-                        }
-                        else if (fAspectRatio < fNativeAspect) {
-                            *reinterpret_cast<float*>(ctx.rsp + 0x7C) = ((float)iCompositeLayerX - (float)iCurrentResX) / 2.00f;    // Horizontal offset
-                            *reinterpret_cast<float*>(ctx.rsp + 0x80) = fHUDHeightOffset;                                           // Vetical offset
-                        }
-                    }
-                });
-        }
-        else {
-            spdlog::error("HUD: Offset: Pattern scan failed.");
+            spdlog::error("HUD: Size: Pattern scan failed.");
         }
 
         // Map
@@ -453,7 +427,7 @@ void HUD()
             HUDMapMidHook = safetyhook::create_mid(HUDMapScanResult + 0x5,
                 [](SafetyHookContext& ctx) {
                     if (fAspectRatio != fNativeAspect) {
-                        ctx.xmm0.f32[0] = fHUDWidthScale;
+                        ctx.xmm0.f32[0] = fHUDHeightScale;
                     }    
                 });
         }
@@ -469,12 +443,8 @@ void HUD()
             static SafetyHookMid QTEPromptsOffsetMidHook{};
             QTEPromptsOffsetMidHook = safetyhook::create_mid(QTEPromptsScanResult,
                 [](SafetyHookContext& ctx) {
-                    if (fAspectRatio > fNativeAspect) {
+                    if (fAspectRatio != fNativeAspect) {
                         ctx.xmm6.f32[0] += fHUDWidthOffset * 2.00f;
-                        ctx.xmm7.f32[0] += (float)iCompositeLayerY - (float)iCurrentResY;
-                    }
-                    else if (fAspectRatio < fNativeAspect) {
-                        ctx.xmm6.f32[0] += (float)iCompositeLayerX - (float)iCurrentResX;
                         ctx.xmm7.f32[0] += fHUDHeightOffset * 2.00f;
                     }
                 });
@@ -483,9 +453,9 @@ void HUD()
             QTEPromptsScaleMidHook = safetyhook::create_mid(QTEPromptsScanResult + 0x52,
                 [](SafetyHookContext& ctx) {
                     if (fAspectRatio > fNativeAspect)
-                        *reinterpret_cast<float*>(ctx.rsp + 0x4C) = 0.20f / fHUDWidthScale;
+                        *reinterpret_cast<float*>(ctx.rsp + 0x4C) = 0.20f / fHUDHeightScale;
                     else if (fAspectRatio < fNativeAspect)
-                        *reinterpret_cast<float*>(ctx.rsp + 0x50) = 0.20f / fHUDWidthScale;
+                        *reinterpret_cast<float*>(ctx.rsp + 0x50) = 0.20f / fHUDHeightScale;
                 });
         }
         else {
@@ -504,9 +474,9 @@ void HUD()
                 [](SafetyHookContext& ctx) {
                     if (!bMovieIsPlaying) {
                         if (fAspectRatio > fNativeAspect)
-                            ctx.xmm0.f32[0] = ctx.xmm0.f32[1] * fAspectRatio;
+                            ctx.xmm0.f32[0] = (ctx.xmm0.f32[1] * fAspectRatio) + 4.00f;
                         else if (fAspectRatio < fNativeAspect)
-                            ctx.xmm0.f32[1] = ctx.xmm0.f32[0] / fAspectRatio;
+                            ctx.xmm0.f32[1] = (ctx.xmm0.f32[0] / fAspectRatio) + 4.00f;
                     }
                 });
 
@@ -587,7 +557,6 @@ DWORD __stdcall Main(void*)
 {
     Logging();
     Configuration();
-    UpdateOffsets();
     CurrentResolution();
     AspectRatioFOV();
     HUD();

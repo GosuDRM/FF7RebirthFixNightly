@@ -28,9 +28,9 @@ This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, dis
 
 ## Known Issues
 #### Ultrawide/narrower
-- HUD may appear blurry at wider aspect ratios such as 32:9.
 - Some button prompts may appear off-screen or move with the camera.
-- Some HUD elements such as the blue glow around selections in the main menu are positioned incorrectly. 
+- Some HUD elements such as the blue glow around selections in the main menu are positioned incorrectly.
+- The TV overlay during the parade mini-game appear cropped.
 
 ## Recommended Mods
 - [FFVIIHook](https://www.nexusmods.com/finalfantasy7rebirth/mods/4) by [emoose](https://github.com/emoose) - Unlocks the console, allows overriding certain cvars and more.
