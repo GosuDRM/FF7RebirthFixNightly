@@ -27,9 +27,9 @@ This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, dis
 - See **FF7RebirthFix.ini** to adjust settings.
 
 ## Known Issues
+Please report any issues you see. This list will contain bugs which may or may not be fixed.
 #### Ultrawide/Narrower
-- Some button prompts may appear off-screen or move with the camera.
-- Shooting is offset in the Barret minecart minigame.
+- Some button prompts in QTE sequences may appear off-screen or move with the camera.
 
 ## Recommended Mods
 - [FFVIIHook](https://www.nexusmods.com/finalfantasy7rebirth/mods/4) by [emoose](https://github.com/emoose) - Unlocks the console, allows overriding certain cvars and more.

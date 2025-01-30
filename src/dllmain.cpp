@@ -13,7 +13,7 @@ HMODULE thisModule;
 
 // Fix details
 std::string sFixName = "FF7RebirthFix";
-std::string sFixVersion = "0.0.6";
+std::string sFixVersion = "0.0.7";
 std::filesystem::path sFixPath;
 
 // Ini
@@ -138,8 +138,7 @@ void Configuration()
     inipp::get_value(ini.sections["Vignette"], "Strength", fVignetteStrength);
 
     // Clamp settings to avoid breaking things
-    if (fHUDResScale != 0.00f)
-        fHUDResScale = std::clamp(fHUDResScale, 0.00f, 5.00f);
+    fHUDResScale = std::clamp(fHUDResScale, 0.00f, 3.00f);
     fVignetteStrength = std::clamp(fVignetteStrength, 0.00f, 1.00f);
 
     // Log ini parse
@@ -178,7 +177,7 @@ void CalculateAspectRatio(bool bLog)
 
 void CalculateHUD(bool bLog)
 {
-    const int MAX_RENDER_TARGET_SIZE = 8192;
+    const int MAX_RENDER_TARGET_SIZE = 16384;
     float ResScale = 1.00f;
 
     if (fHUDResScale == 0.00f) {
@@ -235,7 +234,7 @@ void CalculateHUD(bool bLog)
     }
 
     // Calculate HUD scale
-    fHUDScale = std::round(fHUDHeight * (1.00f / 1080.00f) * 10000.00f) / 10000.00f;
+    fHUDScale = std::round(fHUDHeight * (1.00f / 1080.00f) * 100.00f) / 100.00f;
 
     // Log details about current HUD size
     if (bLog) {
@@ -329,7 +328,9 @@ void AspectRatioFOV()
         else {
             spdlog::error("Aspect Ratio/FOV: Pattern scan failed.");
         }
+    }
 
+    if (bFixAspect) {
         // White screen bug with TAA
         // TODO: This is kind of a hack solution. NSight/RenderDoc for more info?
         std::uint8_t* WhiteScreenBugScanResult = Memory::PatternScan(exeModule, "C7 45 ?? 38 04 00 00 48 8D ?? ?? ?? ?? ?? 75 ?? 48 8D ?? ?? ?? ?? ?? 45 33 ??");
@@ -340,6 +341,32 @@ void AspectRatioFOV()
         }
         else {
             spdlog::error("White Screen Bug: Pattern scan failed.");
+        }
+
+        // Minecart Minigame
+        std::uint8_t* MinecartMinigameScanResult = Memory::PatternScan(exeModule, "48 8B ?? ?? ?? ?? ?? C5 FA ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 F2 ?? ?? C5 F2 ?? ?? ?? ?? ?? ??");
+        if (MinecartMinigameScanResult) {
+            spdlog::info("Minecart Minigame: Address is {:s}+{:x}", sExeName.c_str(), MinecartMinigameScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid MinecartMinigameWidthMidHook{};
+            MinecartMinigameWidthMidHook = safetyhook::create_mid(MinecartMinigameScanResult,
+                [](SafetyHookContext& ctx) {
+                    if (fAspectRatio > fNativeAspect) {
+                        ctx.xmm4.f32[0] = iCurrentResY * fNativeAspect;
+                        ctx.xmm0.f32[0] -= (iCurrentResX - ctx.xmm4.f32[0]) / 2.00f;
+                    }
+                });
+
+            static SafetyHookMid MinecartMinigameHeightMidHook{};
+            MinecartMinigameHeightMidHook = safetyhook::create_mid(MinecartMinigameScanResult + 0x1B,
+                [](SafetyHookContext& ctx) {
+                    if (fAspectRatio < fNativeAspect) {
+                        ctx.xmm3.f32[0] = iCurrentResX / fNativeAspect;
+                        ctx.xmm1.f32[0] -= (iCurrentResY - ctx.xmm3.f32[0]) / 2.00f;
+                    }
+                });
+        }
+        else {
+            spdlog::error("Minecart Minigame: Pattern scan failed.");
         }
     }
 
@@ -519,19 +546,29 @@ void HUD()
         }
 
         // Map
-        std::uint8_t* HUDMapScanResult = Memory::PatternScan(exeModule, "E8 ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? 48 8B ?? ?? ?? ?? ?? C5 FA ?? ?? ?? C5 FA ?? ?? C5 FA ?? ?? ?? 68");
-        if (HUDMapScanResult) {
-            spdlog::info("HUD: Map: Address is {:s}+{:x}", sExeName.c_str(), HUDMapScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid HUDMapMidHook{};
-            HUDMapMidHook = safetyhook::create_mid(HUDMapScanResult + 0x5,
+        std::uint8_t* HUDMapUpperScanResult = Memory::PatternScan(exeModule, "E8 ?? ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? 48 8B ?? ?? ?? ?? ?? C5 FA ?? ?? ?? C5 FA ?? ?? C5 FA ?? ?? ?? 68");
+        std::uint8_t* HUDMapLowerScanResult = Memory::PatternScan(exeModule, "E8 ?? ?? ?? ?? C5 FA ?? ?? ?? C5 ?? ?? ?? 48 8B ?? ?? ?? ?? ?? C5 ?? ?? ?? C5 FA ?? ?? ?? ?? C5 FA ?? ?? ?? 48 8B ??");
+        if (HUDMapUpperScanResult && HUDMapLowerScanResult) {
+            spdlog::info("HUD: Map: Upper: Address is {:s}+{:x}", sExeName.c_str(), HUDMapUpperScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid HUDMapUpperMidHook{};
+            HUDMapUpperMidHook = safetyhook::create_mid(HUDMapUpperScanResult + 0x5,
                 [](SafetyHookContext& ctx) {
                     if (fAspectRatio != fNativeAspect) {
                         ctx.xmm0.f32[0] = fHUDScale;
                     }    
                 });
+
+            spdlog::info("HUD: Map: Lower: Address is {:s}+{:x}", sExeName.c_str(), HUDMapLowerScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid HUDMapLowerMidHook{};
+            HUDMapLowerMidHook = safetyhook::create_mid(HUDMapLowerScanResult + 0x5,
+                [](SafetyHookContext& ctx) {
+                    if (fAspectRatio != fNativeAspect) {
+                        ctx.xmm0.f32[0] = fHUDScale;
+                    }
+                });
         }
         else {
-            spdlog::error("HUD: Map: Pattern scan failed.");
+            spdlog::error("HUD: Map: Pattern scan(s) failed.");
         }
 
         // QTE Prompts
