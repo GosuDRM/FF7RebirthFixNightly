@@ -28,6 +28,11 @@
     <ClCompile Include="external\safetyhook\safetyhook.cpp" />
     <ClCompile Include="external\safetyhook\Zydis.c" />
     <ClCompile Include="src\dllmain.cpp" />
+    <ClCompile Include="src\SDK\Basic.cpp" />
+    <ClCompile Include="src\SDK\CoreUObject_functions.cpp" />
+    <ClCompile Include="src\SDK\EndGame_functions.cpp" />
+    <ClCompile Include="src\SDK\Engine_functions.cpp" />
+    <ClCompile Include="src\SDK\UMG_functions.cpp" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -183,7 +188,7 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <EnableUAC>false</EnableUAC>
-      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
       <LinkTimeCodeGeneration>UseLinkTimeCodeGeneration</LinkTimeCodeGeneration>
     </Link>
   </ItemDefinitionGroup>

@@ -8,10 +8,11 @@ This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, dis
 ### General
 - Adjust gameplay FOV.
 - Adjust framerate limit option.
-- Disable vignette.
+- Disable/adjust vignette.
+- Adjust the size of subtitles.
 
 ### Ultrawide/Narrower
-- Support for any aspect ratio with corrected FOV.
+- Support for ultrawide or narrower displays with correct FOV.
 - Centered 16:9 HUD.
 
 ## Installation

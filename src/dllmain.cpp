@@ -1,6 +1,14 @@
 ﻿#include "stdafx.h"
 #include "helper.hpp"
 
+#include "SDK/Engine_classes.hpp"
+#include "SDK/Pause_00_classes.hpp"
+#include "SDK/Com_Window_01_classes.hpp"
+#include "SDK/AreaMap_TopBase_classes.hpp"
+#include "SDK/VR_Top_classes.hpp"
+#include "SDK/BattleTips_classes.hpp"
+#include "SDK/Subtitle00_classes.hpp"
+
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
 #include <inipp/inipp.h>
@@ -13,7 +21,7 @@ HMODULE thisModule;
 
 // Fix details
 std::string sFixName = "FF7RebirthFix";
-std::string sFixVersion = "0.0.7";
+std::string sFixVersion = "0.0.8";
 std::filesystem::path sFixPath;
 
 // Ini
@@ -48,6 +56,9 @@ float fFOVMulti;
 bool bAutoVignette;
 float fVignetteStrength;
 float fHUDResScale;
+int iCustomResX;
+int iCustomResY;
+float fSubtitleScale;
 
 // Variables
 int iCurrentResX;
@@ -56,10 +67,17 @@ int iCompositeLayerX = 1920;
 int iCompositeLayerY = 1080;
 int iPrevCompositeLayerX;
 int iPrevCompositeLayerY;
-bool bConsoleIsOpen = false;
 bool bMovieIsPlaying = false;
 int iScreenMode;
 bool bHUDNeedsResize = false;
+
+// HUD Widgets
+SDK::USubtitle00_C* UMGSubtitles = nullptr;
+SDK::UPause_00_C* UMGPauseMenu = nullptr;
+SDK::UCom_Window_01_C* UMGComWindow = nullptr;
+SDK::UAreaMap_TopBase_C* UMGAreaMap = nullptr;
+SDK::UVR_Top_C* UMGVRTop = nullptr;
+SDK::UBattleTips_C* UMGBattleTips = nullptr;
 
 void Logging()
 {
@@ -127,30 +145,39 @@ void Configuration()
     spdlog::info("----------");
 
     // Load settings from ini
-    inipp::get_value(ini.sections["Fix Aspect Ratio"], "Enabled", bFixAspect);
-    inipp::get_value(ini.sections["Fix HUD"], "Enabled", bFixHUD);
-    inipp::get_value(ini.sections["Fix HUD"], "ResScale", fHUDResScale);
-    inipp::get_value(ini.sections["Fix Movies"], "Enabled", bFixMovies);
     inipp::get_value(ini.sections["Framerate"], "FPS", fFramerateLimit);
     inipp::get_value(ini.sections["FOV"], "Global", bGlobalFOVMulti);
     inipp::get_value(ini.sections["FOV"], "Multiplier", fFOVMulti);
     inipp::get_value(ini.sections["Vignette"], "Auto", bAutoVignette);
     inipp::get_value(ini.sections["Vignette"], "Strength", fVignetteStrength);
+    inipp::get_value(ini.sections["Subtitles"], "Size", fSubtitleScale);
+
+    inipp::get_value(ini.sections["Custom Resolution"], "Width", iCustomResX);
+    inipp::get_value(ini.sections["Custom Resolution"], "Height", iCustomResY);
+    inipp::get_value(ini.sections["Fix Aspect Ratio"], "Enabled", bFixAspect);
+    inipp::get_value(ini.sections["Fix HUD"], "Enabled", bFixHUD);
+    inipp::get_value(ini.sections["Fix HUD"], "ResScale", fHUDResScale);
+    inipp::get_value(ini.sections["Fix Movies"], "Enabled", bFixMovies);
 
     // Clamp settings to avoid breaking things
     fHUDResScale = std::clamp(fHUDResScale, 0.00f, 3.00f);
     fVignetteStrength = std::clamp(fVignetteStrength, 0.00f, 1.00f);
+    fSubtitleScale = std::clamp(fSubtitleScale, 0.100f, 2.00f);
 
     // Log ini parse
-    spdlog_confparse(bFixAspect);
-    spdlog_confparse(bFixHUD);
-    spdlog_confparse(fHUDResScale);
-    spdlog_confparse(bFixMovies);
     spdlog_confparse(fFramerateLimit);
     spdlog_confparse(bGlobalFOVMulti);
     spdlog_confparse(fFOVMulti);
     spdlog_confparse(bAutoVignette);
     spdlog_confparse(fVignetteStrength);
+    spdlog_confparse(fSubtitleScale);
+
+    spdlog_confparse(iCustomResX);
+    spdlog_confparse(iCustomResY);
+    spdlog_confparse(bFixAspect);
+    spdlog_confparse(bFixHUD);
+    spdlog_confparse(fHUDResScale);
+    spdlog_confparse(bFixMovies);
 
     spdlog::info("----------");
 }
@@ -234,7 +261,8 @@ void CalculateHUD(bool bLog)
     }
 
     // Calculate HUD scale
-    fHUDScale = std::round(fHUDHeight * (1.00f / 1080.00f) * 100.00f) / 100.00f;
+    fHUDScale = std::ceilf((fHUDHeight / 1080.00f) * 1000.00f) / 1000.00f;
+    fHUDScale += 0.001f;
 
     // Log details about current HUD size
     if (bLog) {
@@ -252,6 +280,46 @@ void CalculateHUD(bool bLog)
     bHUDNeedsResize = false;
 }
 
+void UpdateOffsets()
+{
+    // GObjects
+    std::uint8_t* GObjectsScanResult = Memory::PatternScan(exeModule, "48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? 48 8D ?? ?? EB ?? 33 ??");
+    if (GObjectsScanResult) {
+        spdlog::info("Offsets: GObjects: Address is {:s}+{:x}", sExeName.c_str(), GObjectsScanResult - (std::uint8_t*)exeModule);
+        std::uint8_t* GObjectsAddr = Memory::GetAbsolute(GObjectsScanResult + 0x3);
+        SDK::Offsets::GObjects = static_cast<UC::uint32>(GObjectsAddr - (std::uint8_t*)exeModule);
+        spdlog::info("Offsets: GObjects: {:x}", SDK::Offsets::GObjects);
+    }
+    else {
+        spdlog::error("Offsets: GObjects: Pattern scan failed.");
+    }
+
+    // GNames
+    std::uint8_t* GNamesScanResult = Memory::PatternScan(exeModule, "48 8D ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? 4C 8B ?? C6 ?? ?? ?? ?? ?? 01");
+    if (GNamesScanResult) {
+        spdlog::info("Offsets: GNames: Address is {:s}+{:x}", sExeName.c_str(), GNamesScanResult - (std::uint8_t*)exeModule);
+        std::uint8_t* GNamesAddr = Memory::GetAbsolute(GNamesScanResult + 0x3);
+        SDK::Offsets::GNames = static_cast<UC::uint32>(GNamesAddr - (std::uint8_t*)exeModule);
+        spdlog::info("Offsets: GNames: {:x}", SDK::Offsets::GNames);
+    }
+    else {
+        spdlog::error("Offsets: GNames: Pattern scan failed.");
+    }
+
+    // ProcessEvent
+    std::uint8_t* ProcessEventScanResult = Memory::PatternScan(exeModule, "40 ?? 56 57 41 ?? 41 ?? 41 ?? 41 ?? B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? 48 8D ?? ?? ?? 48 89 ?? ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 33 ?? 48 89 ?? ?? ?? ?? ?? 8B ?? ?? 45 33 ??");
+    if (ProcessEventScanResult) {
+        spdlog::info("Offsets: ProcessEvent: Address is {:s}+{:x}", sExeName.c_str(), ProcessEventScanResult - (std::uint8_t*)exeModule);
+        SDK::Offsets::ProcessEvent = static_cast<UC::uint32>(ProcessEventScanResult - (std::uint8_t*)exeModule);
+        spdlog::info("Offsets: ProcessEvent: {:x}", SDK::Offsets::ProcessEvent);
+    }
+    else {
+        spdlog::error("Offsets: ProcessEvent: Pattern scan failed.");
+    }
+
+    spdlog::info("----------");
+}
+
 void CurrentResolution()
 {
     // Grab desktop resolution
@@ -261,8 +329,16 @@ void CurrentResolution()
     std::uint8_t* WindowedResListScanResult = Memory::PatternScan(exeModule, "C7 ?? ?? ?? 00 0F 00 00 C7 ?? ?? ?? 70 08 00 00");
     if (WindowedResListScanResult) {
         spdlog::info("Windowed Resolution List: Address is {:s}+{:x}", sExeName.c_str(), WindowedResListScanResult - (std::uint8_t*)exeModule);
-        Memory::Write(WindowedResListScanResult + 0x4, DesktopDimensions.first);
-        Memory::Write(WindowedResListScanResult + 0xC, DesktopDimensions.second);
+        if (iCustomResX <= 0 || iCustomResY <= 0) {
+            Memory::Write(WindowedResListScanResult + 0x4, DesktopDimensions.first);
+            Memory::Write(WindowedResListScanResult + 0xC, DesktopDimensions.second);
+            spdlog::info("Windowed Resolution List: Replaced 3840x2160 with {}x{}", DesktopDimensions.first, DesktopDimensions.second);
+        }
+        else {
+            Memory::Write(WindowedResListScanResult + 0x4, iCustomResX);
+            Memory::Write(WindowedResListScanResult + 0xC, iCustomResY);
+            spdlog::info("Windowed Resolution List: Replaced 3840x2160 with {}x{}", iCustomResX, iCustomResY);
+        }
     }
     else {
         spdlog::error("Windowed Resolution List: Pattern scan failed.");
@@ -391,33 +467,31 @@ void AspectRatioFOV()
 
     if (!bGlobalFOVMulti && fFOVMulti != 1.00f) {
         // Gameplay FOV
-        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 CA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? C5 FA ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? 45 ?? ??");
-        if (GameplayFOVScanResult) {
-            spdlog::info("Gameplay FOV: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVScanResult - (std::uint8_t*)exeModule);
+        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 FA ?? ?? ?? C5 FA ?? ?? ?? ?? ?? ?? 45 ?? ?? 49 ?? ?? BE ?? ?? ?? ?? 48 8B ?? ?? ?? ?? ?? 48 8B ?? ?? ??");
+        std::uint8_t* GameplayFOVOtherScanResult = Memory::PatternScan(exeModule, "74 ?? C4 ?? ?? ?? ?? ?? EB ?? C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? 41 ?? ??");
+        if (GameplayFOVScanResult && GameplayFOVOtherScanResult) {
+            spdlog::info("Gameplay FOV: Normal: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVScanResult - (std::uint8_t*)exeModule);
             static SafetyHookMid GameplayFOVMidHook{};
             GameplayFOVMidHook = safetyhook::create_mid(GameplayFOVScanResult,
                 [](SafetyHookContext& ctx) {
-                    ctx.xmm0.f32[0] *= fFOVMulti;
-                });
-        }
-        else {
-            spdlog::error("Gameplay FOV: Pattern scan failed.");
-        }
+                    auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
 
-        // Chocobo FOV
-        std::uint8_t* ChocoboFOVScanResult = Memory::PatternScan(exeModule, "89 ?? ?? ?? ?? ?? E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 44 ?? ?? ?? 75 ?? E8 ?? ?? ?? ??");
-        if (ChocoboFOVScanResult) {
-            spdlog::info("Gameplay FOV: Chocobo: Address is {:s}+{:x}", sExeName.c_str(), ChocoboFOVScanResult - (std::uint8_t*)exeModule);
-            static SafetyHookMid ChocoboFOVMidHook{};
-            ChocoboFOVMidHook = safetyhook::create_mid(ChocoboFOVScanResult,
+                    if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                        ctx.xmm0.f32[0] *= fFOVMulti;
+                });
+
+            spdlog::info("Gameplay FOV: Other: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVOtherScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid GameplayFOVOtherMidHook{};
+            GameplayFOVOtherMidHook = safetyhook::create_mid(GameplayFOVOtherScanResult + 0x2,
                 [](SafetyHookContext& ctx) {
-                    float fov = *reinterpret_cast<float*>(&ctx.rax);
-                    fov *= fFOVMulti;
-                    ctx.rax = *(uint32_t*)&fov;
+                    auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
+
+                    if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                        ctx.xmm0.f32[0] *= fFOVMulti;
                 });
         }
         else {
-            spdlog::error("Gameplay FOV: Chocobo: Pattern scan failed.");
+            spdlog::error("Gameplay FOV: Pattern scan(s) failed.");
         }
     }
 }
@@ -666,9 +740,160 @@ void HUD()
             spdlog::error("HUD: Movie: Pattern scan(s) failed.");
         }
     }
+
+    // HUD Widgets
+    std::uint8_t* HUDWidgetsScanResult = Memory::PatternScan(exeModule, "48 8D ?? ?? ?? ?? ?? 89 ?? ?? ?? 8B ?? ?? 89 ?? ?? ?? 49 ?? ?? 48 89 ?? ?? ?? E8 ?? ?? ?? ?? 48 8B ?? 48 85 ?? 74 ??");
+    if (HUDWidgetsScanResult) {
+        static SDK::UObject* obj = nullptr;
+        static SDK::UObject* oldObj = nullptr;
+
+        static std::string objName;
+        static std::string objOldName;
+
+        spdlog::info("HUD: Widgets: Address is {:s}+{:x}", sExeName.c_str(), HUDWidgetsScanResult - (std::uint8_t*)exeModule);
+        static SafetyHookMid HUDWidgetsMidHook{};
+        HUDWidgetsMidHook = safetyhook::create_mid(Memory::GetAbsolute(HUDWidgetsScanResult + 0x3),
+            [](SafetyHookContext& ctx) {
+                obj = (SDK::UObject*)ctx.rcx;
+
+                // Check if object has changed
+                if (obj != oldObj) {
+                    oldObj = obj;
+
+                    // Only store the name of the object when it has changed
+                    objName = obj->GetName();
+
+                    // "Pause_00_C", "simple" pause menu
+                    if (objName.contains("Pause_00_C") && UMGPauseMenu != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: Pause Menu: {}", objName);
+                        spdlog::info("HUD: Widgets: Pause Menu: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGPauseMenu = (SDK::UPause_00_C*)obj;
+
+                        // // Get root widget and panel slot(s)
+                        SDK::UEndCanvasPanel* rootWidget = (SDK::UEndCanvasPanel*)UMGPauseMenu->WidgetTree->RootWidget;
+                        SDK::UEndCanvasPanelSlot* bgSlot = (SDK::UEndCanvasPanelSlot*)rootWidget->Slots[0];
+                        SDK::UEndCanvasPanelSlot* gradientSlot = (SDK::UEndCanvasPanelSlot*)rootWidget->Slots[1];
+
+                        // Create offsets
+                        SDK::FMargin offsets = SDK::FMargin(0.00f, 0.00f, 1920.00f, 1080.00f);
+
+                        // Adjust offsets to allow backgrounds to fill the screen
+                        if (fAspectRatio > fNativeAspect)
+                            offsets.RIGHT = 1080.00f * fAspectRatio;
+                        else if (fAspectRatio < fNativeAspect)
+                            offsets.Bottom = 1920.00f / fAspectRatio;
+
+                        // Set adjusted offsets
+                        bgSlot->SetOffsets(offsets);
+                        gradientSlot->SetOffsets(offsets);
+                    }
+
+                    // "Com_Window_01_C", menu dialog window
+                    if (objName.contains("Com_Window_01_C") && UMGComWindow != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: Com Window: {}", objName);
+                        spdlog::info("HUD: Widgets: Com Window: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGComWindow = (SDK::UCom_Window_01_C*)obj;
+
+                        // Adjust to span the screen
+                        if (fAspectRatio > fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = -(fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f + (fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f;
+                        }
+                        else if (fAspectRatio < fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = -(fHUDHeightOffset / fHUDHeight);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f + (fHUDHeightOffset / fHUDHeight);
+                        }
+                    }
+
+                    // "AreaMap_TopBase_C", area map (a.k.a the thing that comes up when you press tab) base layer
+                    if (objName.contains("AreaMap_TopBase_C") && UMGAreaMap != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: Area Map Top Base: {}", objName);
+                        spdlog::info("HUD: Widgets: Area Map Top Base: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGAreaMap = (SDK::UAreaMap_TopBase_C*)obj;
+
+                        // Adjust to span the screen
+                        if (fAspectRatio > fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = -(fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f + (fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f;
+                        }
+                        else if (fAspectRatio < fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = -(fHUDHeightOffset / fHUDHeight);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f + (fHUDHeightOffset / fHUDHeight);
+                        }
+                    }
+
+                    // "VR_Top_C", Chadley combat simulator menu
+                    if (objName.contains("VR_Top_C") && UMGVRTop != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: VR Top: {}", objName);
+                        spdlog::info("HUD: Widgets: VR Top: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGVRTop = (SDK::UVR_Top_C*)obj;
+
+                        // Adjust to span the screen
+                        if (fAspectRatio > fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = -(fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f + (fHUDWidthOffset / fHUDWidth);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f;
+                        }
+                        else if (fAspectRatio < fNativeAspect) {
+                            *reinterpret_cast<float*>(ctx.rcx + 0x210) = 0.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x214) = -(fHUDHeightOffset / fHUDHeight);
+                            *reinterpret_cast<float*>(ctx.rcx + 0x218) = 1.00f;
+                            *reinterpret_cast<float*>(ctx.rcx + 0x21C) = 1.00f + (fHUDHeightOffset / fHUDHeight);
+                        }
+                    }
+
+                    // "BattleTips_C", tutorial windows
+                    if (objName.contains("BattleTips_C") && UMGBattleTips != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: Battle Tips: {}", objName);
+                        spdlog::info("HUD: Widgets: Battle Tips: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGBattleTips = (SDK::UBattleTips_C*)obj;
+
+                        // Adjust background to span the screen
+                        if (UMGBattleTips->Img_BlackFilter) {
+                            if (fAspectRatio > fNativeAspect)
+                                UMGBattleTips->Img_BlackFilter->SetRenderScale(SDK::FVector2D(fAspectMultiplier, 1.00f));
+                            else if (fAspectRatio < fNativeAspect)
+                                UMGBattleTips->Img_BlackFilter->SetRenderScale(SDK::FVector2D(1.00f, 1.00f / fAspectMultiplier));
+                        }
+                    }
+                }
+            });
+    }
+    else {
+        spdlog::error("HUD: Widgets: Pattern scan failed.");
+    }
 }
 
-void Framerate()
+void Misc()
 {
     if (fFramerateLimit != 120.00f) {
         // Replace 120 fps option with desired framerate limit
@@ -691,16 +916,95 @@ void Framerate()
             spdlog::error("Framerate Limit: Pattern scan failed.");
         }
     }
+
+    if (fSubtitleScale != 1.00f) {
+        // Subtitles
+        std::uint8_t* ShowSubtitlesScanResult = Memory::PatternScan(exeModule, "48 8B ?? 48 85 ?? 0F 84 ?? ?? ?? ?? 0F ?? ?? ?? ?? EB ?? 45 33 ?? 44 39 ?? ?? ?? ?? ?? B2 03");
+        if (ShowSubtitlesScanResult) {
+            spdlog::info("Subtitles: Address is {:s}+{:x}", sExeName.c_str(), ShowSubtitlesScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid ShowSubtitlesMidHook{};
+            ShowSubtitlesMidHook = safetyhook::create_mid(ShowSubtitlesScanResult,
+                [](SafetyHookContext& ctx) {
+                    if (ctx.rax) {
+                        SDK::UObject* obj = (SDK::UObject*)ctx.rax;
+
+                        if (UMGSubtitles != obj) {
+                            // Cache object
+                            UMGSubtitles = (SDK::USubtitle00_C*)obj;
+
+                            #ifdef _DEBUG
+                            spdlog::info("Subtitles: Widget: {}", obj->GetFullName());
+                            spdlog::info("Subtitles: Widgets Address: {:x}", (uintptr_t)obj);
+                            #endif
+
+                            // Apply size scale to subtitles
+                            if (UMGSubtitles->Txt_Lines)
+                                UMGSubtitles->Txt_Lines->GetParent()->SetRenderScale(SDK::FVector2D(fSubtitleScale, fSubtitleScale));
+                        }
+                    }
+                });
+        }
+        else {
+            spdlog::error("Subtitles: Pattern scan failed.");
+        }
+    }
+
+    /*
+    static bool bHasSkippedIntro = false;
+
+    // Title menu
+    std::uint8_t* TitleMenuScanResult = Memory::PatternScan(exeModule, "48 89 ?? ?? ?? 57 B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? 48 8B ?? E8 ?? ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 8B ?? E8 ?? ?? ?? ?? 48 8B ?? 48 85 ?? 0F 84 ?? ?? ?? ?? 48 8B ?? E8 ?? ?? ?? ?? 84 ??  0F 84 ?? ?? ?? ?? B2 01 48 8B ?? E8 ?? ?? ?? ?? BA 01 00 00 00 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 41 ?? 03");
+    if (TitleMenuScanResult) {
+        spdlog::info("Title Menu: Address is {:s}+{:x}", sExeName.c_str(), TitleMenuScanResult - (std::uint8_t*)exeModule);
+        static SafetyHookMid TitleMenuMidHook{};
+        TitleMenuMidHook = safetyhook::create_mid(TitleMenuScanResult,
+            [](SafetyHookContext& ctx) {
+                if (!bHasSkippedIntro) {
+                    SDK::UEndTitleMenu* menu = (SDK::UEndTitleMenu*)ctx.rcx;
+                    menu->OnPressedAnyButton();
+                    #ifdef _DEBUG
+                    spdlog::info("Title Menu: {:x} | {}", (uintptr_t)menu, menu->GetFullName());
+                    #endif
+                }
+            });
+    }
+    else {
+        spdlog::error("Title Menu: Pattern scan failed.");
+    }
+
+    // Start menu 
+    std::uint8_t* StartMenuScanResult = Memory::PatternScan(exeModule, "8B ?? ?? ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 8B ?? 83 ?? 05 0F 85 ?? ?? ?? ?? E8 ?? ?? ?? ??");
+    if (StartMenuScanResult) {
+        spdlog::info("Start Menu: Address is {:s}+{:x}", sExeName.c_str(), StartMenuScanResult - (std::uint8_t*)exeModule);
+        static SafetyHookMid StartMenuMidHook{};
+        StartMenuMidHook = safetyhook::create_mid((std::uint8_t*)StartMenuScanResult,
+            [](SafetyHookContext& ctx) {
+                if (!bHasSkippedIntro) {
+                    SDK::UEndStartMenu* menu = (SDK::UEndStartMenu*)ctx.rdi;
+                    //menu->OnLoadLatest();
+                    bHasSkippedIntro = true;
+                    SDK::UGameplayStatics::LoadGameFromSlot(L"0", 0);
+                    #ifdef _DEBUG
+                    spdlog::info("Start Menu: {:x} | {}", (uintptr_t)menu, menu->GetFullName());
+                    #endif
+                }
+            });
+    }
+    else {
+        spdlog::error("Start Menu: Pattern scan failed.");
+    }
+    */
 }
 
 DWORD __stdcall Main(void*)
 {
     Logging();
     Configuration();
+    UpdateOffsets();
     CurrentResolution();
     AspectRatioFOV();
     HUD();
-    Framerate();
+    Misc();
 
     return true;
 }
