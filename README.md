@@ -2,7 +2,7 @@
 [![Patreon-Button](https://raw.githubusercontent.com/Lyall/FF7RebirthFix/refs/heads/master/.github/Patreon-Button.png)](https://www.patreon.com/Wintermance) [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W01UAI9)<br />
 [![Github All Releases](https://img.shields.io/github/downloads/Lyall/FF7RebirthFix/total.svg)](https://github.com/Lyall/FF7RebirthFix/releases)
 
-This is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth, distributed as a nightly builds available for early access. It might contain bugs
+This project is a fork of Lyall's original ASI plugin for Final Fantasy VII Rebirth and is distributed as nightly builds, which are available for early access. It may contain bugs.
 
 ## Features
 ### General
