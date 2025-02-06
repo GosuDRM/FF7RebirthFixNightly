@@ -8,6 +8,7 @@
 #include "SDK/VR_Top_classes.hpp"
 #include "SDK/BattleTips_classes.hpp"
 #include "SDK/Subtitle00_classes.hpp"
+#include "SDK/MainMenu_Top_Window_classes.hpp"
 
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/basic_file_sink.h>
@@ -21,7 +22,7 @@ HMODULE thisModule;
 
 // Fix details
 std::string sFixName = "FF7RebirthFix";
-std::string sFixVersion = "0.0.9";
+std::string sFixVersion = "0.0.10";
 std::filesystem::path sFixPath;
 
 // Ini
@@ -78,6 +79,7 @@ SDK::UCom_Window_01_C* UMGComWindow = nullptr;
 SDK::UAreaMap_TopBase_C* UMGAreaMap = nullptr;
 SDK::UVR_Top_C* UMGVRTop = nullptr;
 SDK::UBattleTips_C* UMGBattleTips = nullptr;
+SDK::UMainMenu_Top_Window_C* UMGMainMenu = nullptr;
 
 void Logging()
 {
@@ -467,25 +469,33 @@ void AspectRatioFOV()
 
     if (!bGlobalFOVMulti && fFOVMulti != 1.00f) {
         // Gameplay FOV
-        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "41 ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 38 ?? ?? ?? ?? ?? 0F 84 ?? ?? ?? ??");
-        if (GameplayFOVScanResult) {
+        std::uint8_t* GameplayFOVScanResult = Memory::PatternScan(exeModule, "C5 ?? ?? ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 8B ?? 49 8B ?? BE ?? ?? ?? ??");
+        std::uint8_t* GameplayFOVAltScanResult = Memory::PatternScan(exeModule, "C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? C4 ?? ?? ?? ?? C4 ?? ?? ?? ?? ?? 41 ?? ?? C5 ?? ?? ?? ?? ?? ?? ?? 45 ?? ?? ?? ?? ?? ??");
+        if (GameplayFOVScanResult && GameplayFOVAltScanResult) {
             spdlog::info("Gameplay FOV: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVScanResult - (std::uint8_t*)exeModule);
             static SafetyHookMid GameplayFOVMidHook{};
             GameplayFOVMidHook = safetyhook::create_mid(GameplayFOVScanResult,
                 [](SafetyHookContext& ctx) {
-                    if (ctx.r13 && ctx.r14 && ctx.r15) {
+                    if (ctx.r13) {                       
                         auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
+                        if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                            ctx.xmm0.f32[0] *= fFOVMulti;                  
+                    }
+                });
 
-                        if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle) {
-                            float fov = *reinterpret_cast<float*>(ctx.r14 + 0x90);
-                            fov *= fFOVMulti;
-                            *reinterpret_cast<float*>(ctx.r15 + 0x1C) = fov;
-                        }
+            spdlog::info("Gameplay FOV: Alt: Address is {:s}+{:x}", sExeName.c_str(), GameplayFOVAltScanResult - (std::uint8_t*)exeModule);
+            static SafetyHookMid GameplayFOVAltMidHook{};
+            GameplayFOVAltMidHook = safetyhook::create_mid(GameplayFOVAltScanResult,
+                [](SafetyHookContext& ctx) {
+                    if (ctx.r13) {
+                        auto CamType = static_cast<SDK::EEndCameraOperatorType>(ctx.r13);
+                        if (CamType == SDK::EEndCameraOperatorType::Field || CamType == SDK::EEndCameraOperatorType::Battle)
+                            ctx.xmm0.f32[0] *= fFOVMulti;
                     }
                 });
         }
         else {
-            spdlog::error("Gameplay FOV: Pattern scan failed.");
+            spdlog::error("Gameplay FOV: Pattern scan(s) failed.");
         }
     }
 }
@@ -901,6 +911,28 @@ void HUD()
                                 UMGBattleTips->Img_BlackFilter->SetRenderScale(SDK::FVector2D(1.00f, 1.00f / fAspectMultiplier));
                         }
                     }
+
+                    // "MainMenu_Top_Window_C", Main Menu
+                    if (objName.contains("MainMenu_Top_Window_C") && UMGMainMenu != obj) {
+                        #ifdef _DEBUG
+                        spdlog::info("HUD: Widgets: Main Menu: {}", objName);
+                        spdlog::info("HUD: Widgets: Main Menu: Address: {:x}", (uintptr_t)obj);
+                        #endif
+
+                        // Cache address
+                        UMGMainMenu = (SDK::UMainMenu_Top_Window_C*)obj;
+
+                        // Adjust left menu gradient
+                        if (fAspectRatio > fNativeAspect) {
+                            auto* panel = UMGMainMenu->TopContent2->EndCanvasPanel_0;
+                            if (panel->Slots.IsValidIndex(0)) {
+                                auto* leftMenuGradient = (SDK::UEndCanvasPanelSlot*)panel->Slots[0];
+                                auto offsets = leftMenuGradient->GetOffsets();
+                                offsets.LEFT = -10.00f - (((1080.00f * fAspectRatio) - 1920.00f) / 2.00f);
+                                leftMenuGradient->SetOffsets(offsets);
+                            }
+                        }
+                    }
                 }
             });
     }
@@ -914,7 +946,8 @@ void Misc()
     if (fFramerateLimit != 120.00f) {
         // Replace 120 fps option with desired framerate limit
         std::uint8_t* FramerateLimitScanResult = Memory::PatternScan(exeModule, "B8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 ?? ?? 48 8B ?? 48 8D ?? ?? ?? ?? ?? C5 F2 ?? ??");
-        if (FramerateLimitScanResult) {
+        std::uint8_t* FramerateLimitStringScanResult = Memory::PatternScan(exeModule, "24 00 6D 00 65 00 6E 00 75 00 5F 00 6F 00 70 00 74 00 69 00 6F 00 6E 00 73 00 5F 00 66 00 70 00 73 00 5F 00 31 00 32 00 30");
+        if (FramerateLimitScanResult && FramerateLimitStringScanResult) {
             spdlog::info("Framerate Limit: Address is {:s}+{:x}", sExeName.c_str(), FramerateLimitScanResult - (std::uint8_t*)exeModule);
             static SafetyHookMid FramerateLimitMidHook{};
             FramerateLimitMidHook = safetyhook::create_mid(FramerateLimitScanResult,
@@ -927,9 +960,18 @@ void Misc()
                         #endif
                     }
                 });
+
+            // Write new string for the 120fps option ($menu_options_fps_120)
+            const wchar_t* fpsString = L"$menu_options_fps_120";
+
+            DWORD oldProtect;
+            if (VirtualProtect(FramerateLimitStringScanResult, (std::wcslen(fpsString) + 1) * sizeof(wchar_t), PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                std::swprintf(reinterpret_cast<wchar_t*>(FramerateLimitStringScanResult), 41, L"%.0f fps", fFramerateLimit);
+                VirtualProtect(FramerateLimitStringScanResult, (std::wcslen(fpsString) + 1) * sizeof(wchar_t), oldProtect, &oldProtect);
+            }   
         }
         else {
-            spdlog::error("Framerate Limit: Pattern scan failed.");
+            spdlog::error("Framerate Limit: Pattern scan(s) failed.");
         }
     }
 
@@ -963,6 +1005,66 @@ void Misc()
         else {
             spdlog::error("Subtitles: Pattern scan failed.");
         }
+    }
+
+    // Increase camera distance limits
+    std::uint8_t* OptionsMenuScanResult = Memory::PatternScan(exeModule, "49 ?? ?? EB ?? 48 8B ?? 48 8D ?? ?? 48 ?? ?? 48 ?? ?? 48 ?? ?? 0F 84 ?? ?? ?? ?? 85 ?? 0F 88 ?? ?? ?? ??");
+    if (OptionsMenuScanResult) {
+        spdlog::info("Options Menu: Address is {:s}+{:x}", sExeName.c_str(), OptionsMenuScanResult - (std::uint8_t*)exeModule);
+        static SafetyHookMid OptionsMenuMidHook{};
+        OptionsMenuMidHook = safetyhook::create_mid(OptionsMenuScanResult,
+            [](SafetyHookContext& ctx) {
+                if (ctx.rsi) {
+                    SDK::UObject* obj = (SDK::UObject*)ctx.rsi;
+
+                    if (obj->IsA(SDK::UEndNewOptionsMenu::StaticClass())) {
+                        auto optionsMenu = (SDK::UEndNewOptionsMenu*)obj;
+                        auto options = optionsMenu->_OptionItems;
+
+                        // Iterate over options
+                        for (UC::TPair<SDK::EMenuItemCategory, SDK::FOptionInfos>& option : options) {
+                            // Find camera options
+                            if (option.Key() == SDK::EMenuItemCategory::CameraController) {
+                                // Get option infos
+                                auto& optionInfos = option.Value().Infos;
+                                // Check if options are valid
+                                if (optionInfos.IsValidIndex(0) && optionInfos.IsValidIndex(1)) {
+                                    // Check if max value is unmodified
+                                    if (optionInfos[0].RangeInfo.MaxValue == 3) {
+                                        // Index 0 is Camera Distance: Out of Battle
+                                        optionInfos[0].RangeInfo.MaxValue = 10;
+                                        // Index 1 is Camera Distance: In Battle
+                                        optionInfos[1].RangeInfo.MaxValue = 10;
+                                    }
+                                }
+                            }
+                        }
+                    } 
+                }
+            });
+    }
+    else {
+        spdlog::error("Options Menu: Pattern scan failed.");
+    }
+
+    // CSM splits
+    std::uint8_t* ShadowCascadeSettingsScanResult = Memory::PatternScan(exeModule, "85 ?? 41 0F ?? ?? 89 ?? ?? ?? ?? ?? 8B ?? ?? ?? ?? ?? 89 ?? ?? ?? ?? ??");
+    if (ShadowCascadeSettingsScanResult) {
+        spdlog::info("Shadow Cascade Settings: Address is {:s}+{:x}", sExeName.c_str(), ShadowCascadeSettingsScanResult - (std::uint8_t*)exeModule);
+        static SafetyHookMid ShadowCascadeSettingsMidHook{};
+        ShadowCascadeSettingsMidHook = safetyhook::create_mid(ShadowCascadeSettingsScanResult + 0x1E,
+            [](SafetyHookContext& ctx) {
+                float splitNear = *reinterpret_cast<float*>(&ctx.rax);
+
+                // If near split distance is 500, change it to 1000
+                if (splitNear >= 499.00f && splitNear <= 501.00f) {
+                    splitNear = 1000.00f;
+                    ctx.rax = *reinterpret_cast<uintptr_t*>(&splitNear);
+                }
+            });
+    }
+    else {
+        spdlog::error("Shadow Cascade Settings: Pattern scan failed.");
     }
 
     /*
